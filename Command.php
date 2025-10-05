@@ -4,8 +4,9 @@ declare(strict_types=1);
 
 namespace System\Console;
 
+use System\Console\Interfaces\OutputStream;
+use System\Console\Style\Style;
 use System\Console\Traits\TerminalTrait;
-use System\Text\Str;
 
 /**
  * Add costumize terminal style by adding trits:
@@ -18,6 +19,19 @@ use System\Text\Str;
 class Command implements \ArrayAccess
 {
     use TerminalTrait;
+
+    public const SUCCESS = 0;
+    public const FAILURE = 1;
+    public const INVALID = 2;
+
+    public const VERBOSITY_SILENT       = 0;
+    public const VERBOSITY_QUIET        = 1;
+    public const VERBOSITY_NORMAL       = 2;
+    public const VERBOSITY_VERBOSE      = 3;
+    public const VERBOSITY_VERY_VERBOSE = 4;
+    public const VERBOSITY_DEBUG        = 5;
+
+    protected int $verbosity = self::VERBOSITY_NORMAL;
 
     /**
      * Commandline input.
@@ -68,6 +82,8 @@ class Command implements \ArrayAccess
      */
     protected $command_relation = [];
 
+    protected OutputStream $output_stream;
+
     /**
      * Parse commandline.
      *
@@ -87,6 +103,8 @@ class Command implements \ArrayAccess
         foreach ($this->option_mapper($argv) as $key => $value) {
             $this->option_mapper[$key] = $value;
         }
+
+        $this->verbosity = $this->getDefaultVerbosity();
     }
 
     /**
@@ -104,8 +122,8 @@ class Command implements \ArrayAccess
         $alias        = [];
 
         foreach ($argv as $key => $option) {
-            if ($this->isCommmadParam($option)) {
-                $key_value = explode('=', $option);
+            if ($this->isCommandParam($option)) {
+                $key_value = explode('=', $option, 2);
                 $name      = preg_replace('/^(-{1,2})/', '', $key_value[0]);
 
                 // alias check
@@ -129,8 +147,8 @@ class Command implements \ArrayAccess
                     continue;
                 }
 
-                $next           = $argv[$next_key];
-                if ($this->isCommmadParam($next)) {
+                $next = $argv[$next_key];
+                if ($this->isCommandParam($next)) {
                     $options[$name] = true;
                 }
 
@@ -138,7 +156,21 @@ class Command implements \ArrayAccess
                 continue;
             }
 
-            $options[$last_option][] = $this->removeQuote($option);
+            if (null !== $last_option) {
+                if (false === isset($options[$last_option])) {
+                    $options[$last_option] = [];
+                } elseif (false === is_array($options[$last_option])) {
+                    $options[$last_option] = [$options[$last_option]];
+                }
+
+                $options[$last_option][] = $this->removeQuote($option);
+            } else {
+                if (false === isset($options[''])) {
+                    $options[''] = [];
+                }
+
+                $options[''][] = $this->removeQuote($option);
+            }
         }
 
         // re-group alias
@@ -160,9 +192,9 @@ class Command implements \ArrayAccess
     /**
      * Detect string is command or value.
      */
-    private function isCommmadParam(string $command): bool
+    private function isCommandParam(string $command): bool
     {
-        return Str::startsWith($command, '-') || Str::startsWith($command, '--');
+        return str_starts_with($command, '-');
     }
 
     /**
@@ -170,7 +202,21 @@ class Command implements \ArrayAccess
      */
     private function removeQuote(string $value): string
     {
-        return Str::match($value, '/(["\'])(.*?)\1/')[2] ?? $value;
+        $len = strlen($value);
+
+        if ($len < 2) {
+            return $value;
+        }
+
+        $first = $value[0];
+        $last  = $value[$len - 1];
+
+        // Only remove matching quotes at both ends
+        if (($first === '"' && $last === '"') || ($first === "'" && $last === "'")) {
+            return substr($value, 1, -1);
+        }
+
+        return $value;
     }
 
     /**
@@ -209,6 +255,95 @@ class Command implements \ArrayAccess
     protected function optionPosition()
     {
         return $this->option_mapper[''];
+    }
+
+    /**
+     * @param array{
+     *  colorize?: bool,
+     *  decorate?: bool
+     * } $options
+     */
+    protected function output(OutputStream $output_stream, array $options = []): Style
+    {
+        $output = new Style(options: [
+            'colorize' => $options['colorize'] ?? $this->hasColorSupport(),
+            'decorate' => $options['decorate'] ?? null,
+        ]);
+        $output->setOutputStream($output_stream);
+
+        return $output;
+    }
+
+    /**
+     * Inject default options without overwriting
+     * 1. quiet with flag --quite
+     * 2. verbose with flag -v,-vv or -vvv
+     * 3. debug with flag --debug
+     * if there is no default option set,
+     * then set default verbosity to normal,.
+     */
+    protected function getDefaultVerbosity(): int
+    {
+        if ($this->hasOption('silent')) {
+            return self::VERBOSITY_SILENT;
+        }
+
+        if ($this->hasOption('quiet')) {
+            return self::VERBOSITY_QUIET;
+        }
+
+        if ($this->hasOption('debug') || $this->hasOption('vvv')) {
+            return self::VERBOSITY_DEBUG;
+        }
+
+        if ($this->hasOption('very-verbose') || $this->hasOption('vv')) {
+            return self::VERBOSITY_VERY_VERBOSE;
+        }
+
+        if ($this->hasOption('verbose') || $this->hasOption('v')) {
+            return self::VERBOSITY_VERBOSE;
+        }
+
+        return self::VERBOSITY_NORMAL;
+    }
+
+    public function setVerbosity(int $verbosity): void
+    {
+        if ($verbosity < self::VERBOSITY_SILENT || $verbosity > self::VERBOSITY_DEBUG) {
+            throw new \InvalidArgumentException('Verbosity level must be between ' . self::VERBOSITY_SILENT . ' and ' . self::VERBOSITY_DEBUG);
+        }
+
+        $this->verbosity = $verbosity;
+    }
+
+    public function getVerbosity(): int
+    {
+        return $this->verbosity;
+    }
+
+    public function isSilent(): bool
+    {
+        return $this->verbosity === self::VERBOSITY_SILENT;
+    }
+
+    public function isQuiet(): bool
+    {
+        return $this->verbosity === self::VERBOSITY_QUIET;
+    }
+
+    public function isVerbose(): bool
+    {
+        return $this->verbosity >= self::VERBOSITY_VERBOSE;
+    }
+
+    public function isVeryVerbose(): bool
+    {
+        return $this->verbosity >= self::VERBOSITY_VERY_VERBOSE;
+    }
+
+    public function isDebug(): bool
+    {
+        return $this->verbosity >= self::VERBOSITY_DEBUG;
     }
 
     /**
